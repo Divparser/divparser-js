@@ -1,4 +1,4 @@
-import fetch from "cross-fetch";
+import crossFetch from "cross-fetch";
 import {
   JobResponse,
   ParseDetails,
@@ -8,8 +8,22 @@ import {
   ScrapeListResponse,
   ScrapeRequestPayload,
   StatusResponse,
-  PaginatedScrapeRequestPayload
+  PaginatedScrapeRequestPayload,
+  FetchRequestPayload,
+  ExtractRequestPayload,
+  ProxyMode,
+  ScheduleCreatePayload,
+  ScheduleCreateResponse,
+  ScheduleDetails,
+  ScheduleListResponse,
+  ScheduleActionResponse,
+  ScheduleRunsResponse,
+  FetchHtmlResponse,
+  DeliveryConfig
 } from "./types.js";
+
+export { toJson, toCsv, toXlsx, htmlToMarkdown, flattenForTabular } from "./convert.js";
+export type { PageType, ProxyMode, ScheduleCadence, JobResult, DestinationType, DeliveryFormat, DeliveryConfig } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.divparser.com/v1";
 const DEFAULT_TIMEOUT_MS = 300_000;
@@ -39,7 +53,7 @@ export class DivParserClient {
   }
 
   private async request<T>(path: string, init: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, init);
+    const response = await crossFetch(`${this.baseUrl}${path}`, init);
     const body = await response.json().catch(() => ({}));
     assertResponse(response, body);
     return body as T;
@@ -53,6 +67,7 @@ export class DivParserClient {
       pageType?: PageType;
       wait?: boolean;
       timeoutMs?: number;
+      deliveryConfig?: DeliveryConfig;
     } = {}
   ): Promise<JobResponse & { results?: unknown[] }> {
     const payload: ScrapeRequestPayload = {
@@ -63,6 +78,9 @@ export class DivParserClient {
 
     if (options.name) {
       payload.name = options.name;
+    }
+    if (options.deliveryConfig) {
+      payload.deliveryConfig = options.deliveryConfig;
     }
 
     const result = await this.request<JobResponse>("/scrapes", {
@@ -88,6 +106,7 @@ export class DivParserClient {
       pageType?: PageType;
       wait?: boolean;
       timeoutMs?: number;
+      deliveryConfig?: DeliveryConfig;
     } = {}
   ): Promise<JobResponse & { results?: unknown[] }> {
     const payload: PaginatedScrapeRequestPayload = {
@@ -99,6 +118,9 @@ export class DivParserClient {
 
     if (options.name) {
       payload.name = options.name;
+    }
+    if (options.deliveryConfig) {
+      payload.deliveryConfig = options.deliveryConfig;
     }
 
     const result = await this.request<JobResponse>("/scrapes", {
@@ -130,6 +152,19 @@ export class DivParserClient {
 
   async getScrape(scrapeId: string): Promise<ScrapeDetails> {
     return this.request<ScrapeDetails>(`/scrapes/${encodeURIComponent(scrapeId)}`, {
+      method: "GET",
+      headers: this.headers
+    });
+  }
+
+  /**
+   * Retrieve the raw HTML for a fetched scrape. Only meaningful for a scrape
+   * created via fetch() — GET /scrapes/:id never includes this (it's not an
+   * extraction result). Pair with saveFetchAs() from "divparser-js/node" to
+   * write it to disk as-is or converted to Markdown.
+   */
+  async getFetchHtml(scrapeId: string): Promise<FetchHtmlResponse> {
+    return this.request<FetchHtmlResponse>(`/scrapes/${encodeURIComponent(scrapeId)}/html`, {
       method: "GET",
       headers: this.headers
     });
@@ -224,6 +259,106 @@ export class DivParserClient {
       name: options.name,
       wait: true,
       timeoutMs: options.timeoutMs
+    });
+  }
+
+  /**
+   * Fetch a URL only — no extraction. Attach a schema afterwards with
+   * extractFetch() once the scrape's status is "FETCHED". Note: unlike most
+   * endpoints, the API returns 402 for every failure here (not just
+   * insufficient credits), so check the thrown message rather than relying
+   * on the status code alone.
+   */
+  async fetch(
+    url: string,
+    options: {
+      name?: string;
+      projectId?: string;
+      proxyMode?: ProxyMode;
+      deliveryConfig?: DeliveryConfig;
+    } = {}
+  ): Promise<JobResponse> {
+    const payload: FetchRequestPayload = { url, ...options };
+
+    return this.request<JobResponse>("/fetch", {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify(payload)
+    });
+  }
+
+  /**
+   * Attach a NestLang/prompt schema to a previously-fetched (status:
+   * "FETCHED") scrape and run instant (AI) extraction against its stored HTML.
+   */
+  async extractFetch(
+    scrapeId: string,
+    schema: string,
+    options: { deliveryConfig?: DeliveryConfig } = {}
+  ): Promise<JobResponse> {
+    const payload: ExtractRequestPayload = { schema, ...options };
+
+    return this.request<JobResponse>(`/scrapes/${encodeURIComponent(scrapeId)}/extract`, {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async createSchedule(payload: ScheduleCreatePayload): Promise<ScheduleCreateResponse> {
+    return this.request<ScheduleCreateResponse>("/schedules", {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async listSchedules(): Promise<ScheduleListResponse> {
+    return this.request<ScheduleListResponse>("/schedules", {
+      method: "GET",
+      headers: this.headers
+    });
+  }
+
+  async getSchedule(scheduleId: string): Promise<ScheduleDetails> {
+    return this.request<ScheduleDetails>(`/schedules/${encodeURIComponent(scheduleId)}`, {
+      method: "GET",
+      headers: this.headers
+    });
+  }
+
+  async pauseSchedule(scheduleId: string): Promise<ScheduleActionResponse> {
+    return this.setScheduleAction(scheduleId, "pause");
+  }
+
+  async resumeSchedule(scheduleId: string): Promise<ScheduleActionResponse> {
+    return this.setScheduleAction(scheduleId, "resume");
+  }
+
+  private async setScheduleAction(scheduleId: string, action: "pause" | "resume"): Promise<ScheduleActionResponse> {
+    return this.request<ScheduleActionResponse>(`/schedules/${encodeURIComponent(scheduleId)}`, {
+      method: "PATCH",
+      headers: this.headers,
+      body: JSON.stringify({ action })
+    });
+  }
+
+  async deleteSchedule(scheduleId: string): Promise<ScheduleActionResponse> {
+    return this.request<ScheduleActionResponse>(`/schedules/${encodeURIComponent(scheduleId)}`, {
+      method: "DELETE",
+      headers: this.headers
+    });
+  }
+
+  async listScheduleRuns(scheduleId: string, limit = 20, cursor?: string): Promise<ScheduleRunsResponse> {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) {
+      params.set("cursor", cursor);
+    }
+
+    return this.request<ScheduleRunsResponse>(`/schedules/${encodeURIComponent(scheduleId)}/runs?${params.toString()}`, {
+      method: "GET",
+      headers: this.headers
     });
   }
 }
